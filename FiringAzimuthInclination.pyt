@@ -154,7 +154,7 @@ class FiringAzimuthInclination(object):
         return 0.2032 * ((sample_distance / 1609) ** 2)
 
     def calc_degs(self, distance, curvature, dsm_val, dtm_val, vertical_offset):
-        rads = atan(((dsm_val - curvature) - (dtm_val + vertical_offset)) / distance) * (180 / pi)
+        rads = atan(((dsm_val - curvature) - (dtm_val + vertical_offset)) / distance)
         return degrees(rads)
 
     def get_name(self, path):
