@@ -202,14 +202,20 @@ class FiringAzimuthInclination(object):
         else:
             ao_poly = arcpy.Describe(parameters[1].valueAsText).extent
             ao_extent = Extent(ao_poly.XMin, ao_poly.YMin, ao_poly.XMax, ao_poly.YMax)
+            
+        # Generate fishnet and get center points
+        arcpy.AddMessage(f"Using extent: {ao_extent.lowerLeft} | {ao_extent.upperRight}")
+        arcpy.SetProgressor("default", "Downsampling deployment area extent...")
+        arcpy.CreateFishnet_management(
+            r"memory\fn",
+            f"{ao_extent.XMin} {ao_extent.YMin}",
+            f"{ao_extent.Xmin} {ao_extent.YMax}",
+            cellsize,
+            cellsize,
+            corner_coord=f"{ao_extent.XMax} {ao_extent.YMax}"
+        )
 
-        # Create constant raster denoting area of operations (ao) from ao_extent
-        arcpy.SetProgressor("default", "Building constant raster...")
-        ao = CreateConstantRaster(1, "FLOAT", cell_size=cellsize, extent=ao_extent)
-        ao.save(os.path.join(scratch, "cr"))
-
-        arcpy.SetProgressor("default", "Converting raster to points...")
-        ao_cell_centers = arcpy.RasterToPoint_conversion(ao, os.path.join(scratch, "rcc"))
+        ao_cell_centers = r"memory\fn_label"
         arcpy.AddFields_management(
             ao_cell_centers,
             [["distance", "LONG"],
@@ -219,8 +225,8 @@ class FiringAzimuthInclination(object):
         dtm_sampled = Sample(
             dtm,
             ao_cell_centers,
-            os.path.join(scratch, "dtm_samp"),
-            unique_id_field="OBJECTID",
+            r"memory\dtm_samp",
+            unique_id_field="OID",
             generate_feature_class="FEATURE_CLASS"
         )
         
@@ -243,11 +249,9 @@ class FiringAzimuthInclination(object):
                 row[0] = distance
                 row[1] = bearing
                 cursor.updateRow(row)
+        del cursor
 
         arcpy.AddXY_management(ao_cell_centers)
-
-        arcpy.SetProgressor("default", "Converting points to table...")
-        celltable = arcpy.TableToTable_conversion(ao_cell_centers, r"memory", "celltable")
 
         # Now construct lines of bearing from the table
         arcpy.SetProgressor("default", "Building lines of bearing...")
@@ -262,11 +266,15 @@ class FiringAzimuthInclination(object):
             spatial_reference=sr
         )
 
-        # Build points along line at fixed interval
+        """
+        Generate points along lines of bearing.  We'll write this out because I've
+        found even on very well resourced workstations the script has problems properly
+        completing the surface raster sampling from the points in memory.
+        """
         arcpy.SetProgressor("default", "Creating sample points along lines...")
         samplepoints = arcpy.GeneratePointsAlongLines_management(
             az_lines,
-            r"memory\samplepoints",
+            os.path.join(scratch, "samplepoints"),
             "DISTANCE",
             Distance=f"{interval} meters",
             Include_End_Points="END_POINTS"
@@ -275,7 +283,8 @@ class FiringAzimuthInclination(object):
 
         # Sample the DSM
         arcpy.SetProgressor("default", "Sampling surface dataset...")
-        dsm_sampled = Sample(dsm, samplepoints, r"memory\dsm_sam", generate_feature_class="FEATURE_CLASS")
+        dsm_sampled = Sample(dsm, samplepoints, os.path.join(scratch, "dsm_sam"),
+                             generate_feature_class="FEATURE_CLASS")
 
         # Add from_origin, dsm, and curvature to samplepoints
         arcpy.SetProgressor("default", "Adding analysis fields to sampled points...")
@@ -298,6 +307,7 @@ class FiringAzimuthInclination(object):
             for row in sc:
                 c[row[1]].append(row)
         c = json.loads(json.dumps(c))
+        del sc
 
         # Calculate distance to origin for each point
         sp_with_intervals = {int(k): [(a, b, interval * i) for i, (a, b, c) in enumerate(v)] for k, v in c.items()}
@@ -310,6 +320,7 @@ class FiringAzimuthInclination(object):
                             u_row[2] = n_row[2]
                             u_row[3] = self.curvature(sample_distance=u_row[2])
                 uc.updateRow(u_row)
+        del uc
 
         # Copy over DSM sampled values to samplepoints
         self.copy_sample_values(dsm_sampled, samplepoints, "dsm")
@@ -320,10 +331,13 @@ class FiringAzimuthInclination(object):
         (OID, (SHAPE@XY), ORIG_FID, POINT_X, POINT_Y, DISTANCE, BEARING, SHAPE_LENGTH, FROM_ORIGIN, DSM, CURVATURE)
         """
         # Calculate the inclination of each point in samplepoints relative to its origin in dtm_sampled
+        
         s = defaultdict(list)
         with arcpy.da.SearchCursor(samplepoints, ["ORIG_FID", "from_origin", "dsm", "curvature"]) as sp_cursor:
             for row in sp_cursor:
                 s[row[0]].append(row)
+        del sp_cursor
+        
         samps = dict((k, [i for i in v if i[1] > 0]) for k, v in s.items())
         
         with arcpy.da.UpdateCursor(dtm_sampled, "*") as dtm_cursor:
@@ -337,18 +351,34 @@ class FiringAzimuthInclination(object):
                         d = sp[1]
                         c = sp[3]
                         dsm_val = sp[2]
-                        inclination = self.calc_degs(dtm_val, dsm_val, d, c, vert_offset)
-                        i.append(inclination)
+                        try:
+                            inclination = self.calc_degs(dtm_val, dsm_val, d, c, vert_offset)
+                            i.append(inclination)
+                        except TypeError:  # Use no-data value for distances not covered by surface raster
+                            i.append(-9999)
                     max_inclination = max(i)
                     row[6] = max_inclination
                     row[7] = self.deg_to_valid_mils(max_inclination)
                 dtm_cursor.updateRow(row)
+        del dtm_cursor
 
         # Now create the final output raster from the points based on inclination
         arcpy.SetProgressor("default", "Writing inclination raster...")
-        out_raster_path = os.path.join(default_db,
-                                       arcpy.CreateScratchName(prefix="FAzIncl_", suffix="", data_type="RasterDataset"))
-        incl_raster = arcpy.PointToRaster_conversion(dtm_sampled, "incline_mil", out_raster_path, cell_assignment="MEAN",
-                                                     cellsize=cellsize)
+        if parameters[9].valueAsText:
+            out_raster = parameters[9].valueAsText
+        else:
+            out_raster = os.path.join(default_db, arcpy.CreateScratchName(
+                prefix=f"Incl_{bearing}_",
+                suffix="",
+                data_type="RasterDataset"
+            ))
+        
+        incl_raster = arcpy.PointToRaster_conversion(
+            dtm_sampled, 
+            "incline_mil", 
+            out_raster, 
+            cell_assignment="MEAN",
+            cellsize=cellsize
+        )
 
         return incl_raster
