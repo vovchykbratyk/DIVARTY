@@ -256,7 +256,7 @@ class FiringAzimuthInclination(object):
         # Now construct lines of bearing from the table
         arcpy.SetProgressor("default", "Building lines of bearing...")
         az_lines = arcpy.BearingDistanceToLine_management(
-            celltable,
+            ao_cell_centers,
             r"memory\az_lines",
             "POINT_X",
             "POINT_Y",
