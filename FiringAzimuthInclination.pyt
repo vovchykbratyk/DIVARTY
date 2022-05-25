@@ -110,8 +110,16 @@ class FiringAzimuthInclination(object):
             direction="Input"
         )
         param8.value = 2  # Sane default
+        
+        param9 = arcpy.Parameter(
+            displayName="Output Raster",
+            name="output_raster",
+            datatype="DERasterDataset",
+            parameterType="Optional",
+            direction="Output"
+        )
 
-        return [param0, param1, param2, param3, param4, param5, param6, param7, param8]
+        return [param0, param1, param2, param3, param4, param5, param6, param7, param8, param9]
 
     def isLicensed(self):
         return True
