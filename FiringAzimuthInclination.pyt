@@ -209,7 +209,7 @@ class FiringAzimuthInclination(object):
         arcpy.CreateFishnet_management(
             r"memory\fn",
             f"{ao_extent.XMin} {ao_extent.YMin}",
-            f"{ao_extent.Xmin} {ao_extent.YMax}",
+            f"{ao_extent.XMin} {ao_extent.YMax}",
             cellsize,
             cellsize,
             corner_coord=f"{ao_extent.XMax} {ao_extent.YMax}"
